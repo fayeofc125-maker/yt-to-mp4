@@ -37,6 +37,10 @@
 }
 
 .newVideo:hover { color: var(--ink); }
+.newVideo:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
 
 .editorHeaderActions {
   display: flex;
@@ -127,6 +131,8 @@
   outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
+
+.form:focus-within .inputIcon { color: var(--ink); }
 
 .inputIcon {
   position: absolute;
@@ -242,8 +248,14 @@
 }
 
 .error {
+  max-width: 620px;
   margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ink);
+  background: var(--soft);
   color: var(--ink);
+  font-size: 13px;
 }
 
 .visual {
@@ -317,6 +329,15 @@
   background: #0b0b0b url("/hero-frame.jpg") center / cover no-repeat;
   z-index: 2;
   box-shadow: 0 20px 40px -24px rgba(0, 0, 0, 0.35);
+}
+
+.framePlaceholder {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  color: rgba(255, 255, 255, 0.55);
+  font: 500 9px/1 var(--sans);
+  letter-spacing: 0.16em;
 }
 
 .playButton {

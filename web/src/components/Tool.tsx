@@ -108,6 +108,7 @@ function ClippingPreview() {
             <span /><span /><span />
           </div>
           <div className={styles.mainFrame}>
+            <span className={styles.framePlaceholder}>VIDEO PREVIEW</span>
             <span className={styles.playButton}><span /></span>
             <div className={styles.frameControls}>
               <div className={styles.frameControlMeta}>

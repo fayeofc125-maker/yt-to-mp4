@@ -17,7 +17,10 @@
 
 .editorControls { display: flex; align-items: center; gap: 8px; }
 .editorControls select { height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 2px; background: #fff; font-size: 13px; }
+.editorControls select:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-color: var(--ink); }
 .headerExport { height: 36px; padding: 0 14px; border: 0; border-radius: 2px; background: var(--ink); color: #fff; font: 600 13px/1 var(--sans); cursor: pointer; }
+.headerExport:hover:not(:disabled) { background: #262626; }
+.headerExport:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 .headerExport:disabled { opacity: .45; cursor: not-allowed; }
 
 .meta {
@@ -370,6 +373,9 @@
   display: grid;
   gap: 10px;
   justify-items: start;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: var(--panel);
 }
 
 .note {
