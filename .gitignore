@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+server/.env
+web/.env
+
+# Local databases and runtime files
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Python and tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+server/.venv/
+*.egg-info/
+
+# JavaScript build and dependency artifacts
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo

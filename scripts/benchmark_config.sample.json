@@ -1,0 +1,36 @@
+{
+  "videos": [
+    {
+      "label": "short-big-buck-bunny",
+      "url": "https://youtu.be/29mtSn1RdMQ?si=OKLlyCHl6u_xKPz7",
+      "expected_caption_type": "skip",
+      "start": 0,
+      "end": 30,
+      "res": 720
+    },
+    {
+      "label": "medium-sintel",
+      "url": "https://www.youtube.com/watch?v=eRsGyueVLvQ",
+      "expected_caption_type": "skip",
+      "start": 0,
+      "end": 60,
+      "res": 720
+    },
+    {
+      "label": "long-placeholder",
+      "url": "https://youtu.be/29mtSn1RdMQ?si=OKLlyCHl6u_xKPz7",
+      "expected_caption_type": "skip",
+      "start": 0,
+      "end": 120,
+      "res": 720
+    },
+    {
+      "label": "no-captions-placeholder",
+      "url": "https://youtu.be/29mtSn1RdMQ?si=OKLlyCHl6u_xKPz7",
+      "expected_caption_type": "skip",
+      "start": 0,
+      "end": 30,
+      "res": 720
+    }
+  ]
+}
