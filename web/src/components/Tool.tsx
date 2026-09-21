@@ -65,14 +65,15 @@ export function Tool() {
                   placeholder="Paste YouTube link…"
                   aria-label="YouTube link"
                 />
-                <button type="submit" className={styles.submit} disabled={loading} aria-label={loading ? "Loading video" : "Load video"}>
-                  <span aria-hidden="true">{loading ? "…" : "→"}</span>
+                <button type="submit" className={styles.submit} disabled={loading} aria-label={loading ? "Loading video" : "Clip it"}>
+                  <span className={styles.submitLabel}>{loading ? "Loading…" : "Clip it"}</span>
+                  <span className={styles.submitArrow} aria-hidden="true">{loading ? "…" : "→"}</span>
                 </button>
               </form>
               <p className={styles.microcopy}>
-                <span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m13 2-8 12h6l-1 8 8-12h-6l1-8Z" /></svg>Fast</span>
                 <span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="1" /><path d="M8 21h8M12 17v4" /></svg>Up to 4K</span>
-                <span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m20.5 13.5-7 7-10-10v-7h7l10 10Z" /><circle cx="7.5" cy="7.5" r="1" /></svg>No watermark</span>
+                <span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3.5 18.5 6v6.2c0 4.5-2.7 7.6-6.5 10.3-3.8-2.7-6.5-5.8-6.5-10.3V6L12 3.5Z" /><path d="m9.5 12.2 1.7 1.8 3.5-3.8" /></svg>No signup</span>
+                <span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3.5 18.5 6v6.2c0 4.5-2.7 7.6-6.5 10.3-3.8-2.7-6.5-5.8-6.5-10.3V6L12 3.5Z" /><path d="m9.5 12.2 2.2 2.2 4.5-4.8" /></svg>No watermark</span>
               </p>
 
               {loading && (
@@ -90,7 +91,10 @@ export function Tool() {
       </main>
 
       <footer className={styles.footer}>
-        Simple. Fast. Powerful.
+        <div className={styles.footerInner}>
+          <strong>No signup. No watermark. Clips up to 4K.</strong>
+          <span>Simple. Fast. Powerful.</span>
+        </div>
       </footer>
     </div>
   );

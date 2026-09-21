@@ -6,6 +6,7 @@
   --line: #e6e6e3;
   --accent: #0a0a0a;
   --on-accent: #fff;
+  --oxblood: #8A2A2B;
   --sans: var(--font-sans), system-ui, sans-serif;
   --serif: var(--font-serif), Georgia, serif;
   --mono: var(--font-mono), ui-monospace, monospace;
@@ -41,8 +42,9 @@ button, input { font: inherit; color: inherit; }
 .text-action:focus-visible { outline: 2px solid #0a0a0a; outline-offset: 2px; }
 .text-action:disabled { color: #b5b5b5; cursor: not-allowed; background: transparent; }
 button:focus-visible, input:focus-visible, [role="slider"]:focus-visible {
-  outline: 2px solid var(--ink);
-  outline-offset: 3px;
+  outline: 2px solid var(--oxblood);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(138, 42, 43, 0.12);
 }
 .btn {
   display: inline-flex;
