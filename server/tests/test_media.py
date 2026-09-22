@@ -189,13 +189,24 @@ def test_caption_redirect_validates_target():
 
 
 def test_ffmpeg_uses_argument_list_without_shell(monkeypatch):
+    class FakeProcess:
+        pid = 1
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return b"", b""
+
     seen = {}
 
-    def fake_run(args, **kwargs):
+    def fake_popen(args, **kwargs):
         seen["args"] = args
         seen["kwargs"] = kwargs
+        return FakeProcess()
 
-    monkeypatch.setattr("app.media.subprocess.run", fake_run)
+    monkeypatch.setattr("app.processes.subprocess.Popen", fake_popen)
     _run_ffmpeg(["ffmpeg", "-i", "https://example.invalid/$(touch pwned)", "safe.mp4"], 1)
     assert seen["kwargs"]["shell"] is False
     assert seen["args"][0] == "ffmpeg"
