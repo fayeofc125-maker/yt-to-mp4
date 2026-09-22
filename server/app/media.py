@@ -9,6 +9,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from enum import StrEnum
@@ -21,6 +22,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import download_range_func
 
 from .formats import Quality
+from .processes import ProcessCancelledError, ProcessGroup
 
 
 class Mode(StrEnum):
@@ -196,9 +198,20 @@ def media_timeout_seconds(duration_seconds: float | None = None) -> float:
     return min(ceiling, max(floor, base + per_minute * (duration / 60)))
 
 
-def _timeout_hook(deadline: float, budget: float):
+def _timeout_hook(
+    deadline: float,
+    budget: float,
+    cancelled: threading.Event | None = None,
+    process_group: ProcessGroup | None = None,
+):
     def check(status: dict) -> None:
+        if cancelled is not None and cancelled.is_set():
+            if process_group is not None:
+                process_group.terminate_all()
+            raise ProcessCancelledError
         if time.monotonic() > deadline:
+            if process_group is not None:
+                process_group.terminate_all()
             raise MediaTimeoutError(f"Media operation exceeded its {budget:g}-second timeout")
 
     return check
@@ -363,15 +376,35 @@ def _timestamp(value: str) -> float:
     return sum(float(part) * 60 ** (len(parts) - index - 1) for index, part in enumerate(parts))
 
 
-def _run_ffmpeg(args: list[str], timeout: float) -> None:
-    subprocess.run(args, check=True, capture_output=True, timeout=timeout, shell=False)
+def _run_ffmpeg(
+    args: list[str],
+    timeout: float,
+    cancelled: threading.Event | None = None,
+    process_group: ProcessGroup | None = None,
+) -> None:
+    if process_group is None:
+        with ProcessGroup() as process_group:
+            try:
+                process_group.run(args, timeout, cancelled)
+            except subprocess.TimeoutExpired as exc:
+                raise MediaTimeoutError("Media operation timed out.") from exc
+    else:
+        try:
+            process_group.run(args, timeout, cancelled)
+        except subprocess.TimeoutExpired as exc:
+            raise MediaTimeoutError("Media operation timed out.") from exc
 
 
-def download_clip(spec: ClipSpec, out_dir: Path) -> Clip:
+def download_clip(
+    spec: ClipSpec,
+    out_dir: Path,
+    cancelled: threading.Event | None = None,
+    process_group: ProcessGroup | None = None,
+) -> Clip:
     """Download only the requested range, in the requested quality, as one MP4."""
     budget = media_timeout_seconds(spec.end - spec.start)
     deadline = time.monotonic() + budget
-    timeout_hook = _timeout_hook(deadline, budget)
+    timeout_hook = _timeout_hook(deadline, budget, cancelled, process_group)
     opts = {
         **_BASE_OPTS,
         "socket_timeout": budget,
@@ -401,7 +434,12 @@ def download_clip(spec: ClipSpec, out_dir: Path) -> Clip:
     return Clip(Path(info["requested_downloads"][0]["filepath"]), info["title"])
 
 
-def download_export(specs: tuple[ClipSpec, ...], out_dir: Path) -> list[Clip]:
+def download_export(
+    specs: tuple[ClipSpec, ...],
+    out_dir: Path,
+    cancelled: threading.Event | None = None,
+    process_group: ProcessGroup | None = None,
+) -> list[Clip]:
     """Download one source and cut all ranges from it.
 
     Multi-range exports deliberately share the source download.  Fast cuts use
@@ -412,7 +450,7 @@ def download_export(specs: tuple[ClipSpec, ...], out_dir: Path) -> list[Clip]:
     source_dir.mkdir(parents=True, exist_ok=True)
     budget = media_timeout_seconds(sum(spec.end - spec.start for spec in specs))
     deadline = time.monotonic() + budget
-    timeout_hook = _timeout_hook(deadline, budget)
+    timeout_hook = _timeout_hook(deadline, budget, cancelled, process_group)
     opts = {
         **_BASE_OPTS,
         "socket_timeout": budget,
@@ -456,10 +494,12 @@ def download_export(specs: tuple[ClipSpec, ...], out_dir: Path) -> list[Clip]:
         args += [str(target)]
         remaining = max(0.1, deadline - time.monotonic())
         try:
-            _run_ffmpeg(args, remaining)
+            _run_ffmpeg(args, remaining, cancelled, process_group)
         except subprocess.TimeoutExpired as exc:
             raise MediaTimeoutError(
                 f"Media operation exceeded its {budget:g}-second timeout"
             ) from exc
+        except ProcessCancelledError:
+            raise
         outputs.append(Clip(target, info["title"]))
     return outputs

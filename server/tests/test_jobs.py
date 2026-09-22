@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 
@@ -5,7 +6,7 @@ import pytest
 
 from app.formats import Quality
 from app.jobs import JobManager, JobStatus, QueueFull, TooManyJobs
-from app.media import Clip, ClipSpec, Mode
+from app.media import Clip, ClipSpec, Mode, _run_ffmpeg
 
 SPEC = ClipSpec("https://youtu.be/x", 10, 40, Quality(1080), Mode.EXACT)
 
@@ -127,6 +128,74 @@ def test_estimate_is_learned_from_finished_jobs(manager, gate):
     wait_for(job, JobStatus.DONE)
     assert manager.estimate(SPEC) > 0
     assert manager.estimate(SPEC._replace(mode=Mode.FAST)) is None  # tracked per mode
+
+
+def test_running_cancellation_terminates_process_and_cleans_owned_files(tmp_path):
+    def runner(spec, out_dir, cancelled, process_group):
+        _run_ffmpeg(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            30,
+            cancelled,
+            process_group,
+        )
+        (out_dir / "owned.part").write_bytes(b"partial")
+        return Clip(out_dir / "owned.part", "Title")
+
+    manager = JobManager(runner, workers=1, root=tmp_path / "jobs")
+    job = manager.submit(SPEC, "a")
+    wait_for(job, JobStatus.WORKING)
+    assert manager.cancel(job.id)
+    wait_for(job, JobStatus.CANCELLED)
+    assert not job.work_dir.exists()
+    assert not manager._cancelled
+
+
+def test_media_timeout_is_terminal_failure_and_cleans_work_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.media.media_timeout_seconds", lambda _: 0.05)
+
+    def runner(spec, out_dir, cancelled, process_group):
+        _run_ffmpeg(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            0.05,
+            cancelled,
+            process_group,
+        )
+        raise AssertionError("process should have timed out")
+
+    manager = JobManager(runner, workers=1, root=tmp_path / "jobs")
+    job = manager.submit(SPEC, "a")
+    wait_for(job, JobStatus.FAILED)
+    assert "timed out" in job.error
+    assert not job.work_dir.exists()
+    assert job.status not in {JobStatus.QUEUED, JobStatus.WORKING}
+
+
+def test_already_exited_job_cancellation_is_idempotent(tmp_path):
+    gate = threading.Event()
+
+    def runner(spec, out_dir):
+        gate.wait(2)
+        path = out_dir / "clip.mp4"
+        path.write_bytes(b"done")
+        return Clip(path, "Title")
+
+    manager = JobManager(runner, workers=1, root=tmp_path / "jobs")
+    job = manager.submit(SPEC, "a")
+    wait_for(job, JobStatus.WORKING)
+    gate.set()
+    wait_for(job, JobStatus.DONE)
+    assert not manager.cancel(job.id)
+    assert not manager.cancel(job.id)
+
+
+def test_successful_job_keeps_result_and_cancellation_tracking_bounded(tmp_path):
+    manager = JobManager(lambda spec, out_dir: _clip(out_dir), root=tmp_path / "jobs")
+    jobs = [manager.submit(SPEC, str(index)) for index in range(2)]
+    for job in jobs:
+        wait_for(job, JobStatus.DONE)
+    assert all(job.clip.path.exists() for job in jobs)
+    assert not manager._cancelled
+    assert not manager._cancel_events
 
 
 def _clip(out_dir):

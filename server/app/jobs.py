@@ -23,6 +23,7 @@ from .db import create_db_and_tables, make_engine
 from .formats import Quality
 from .media import Clip, ClipSpec, Mode
 from .models import JobRecord
+from .processes import ProcessCancelledError, ProcessGroup
 from .queue import make_queue
 from .repository import JobRepository
 from .resources import ResourceAdmissionError, ResourceGuard
@@ -141,6 +142,8 @@ class ExportJobManager:
         self._queue = make_queue(self.queue_adapter, self.workers, "export")
         self._jobs: dict[str, ExportJob] = {}
         self._cancelled: set[str] = set()
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._process_groups: dict[str, set[ProcessGroup]] = {}
         self._lock = threading.Lock()
         self._repository = None
         if self.db_url:
@@ -173,6 +176,8 @@ class ExportJobManager:
             job.resource_reserved = True
             job.work_dir.mkdir()
             self._jobs[job.id] = job
+            self._cancel_events[job.id] = threading.Event()
+            self._process_groups[job.id] = set()
             if self._repository:
                 self._repository.add(
                     JobRecord(
@@ -209,8 +214,16 @@ class ExportJobManager:
                 self._release_resources(job)
                 shutil.rmtree(job.work_dir, ignore_errors=True)
                 self._persist(job)
+                self._cancel_events.pop(job_id, None)
+                self._process_groups.pop(job_id, None)
+                self._cancelled.discard(job_id)
             else:
                 self._cancelled.add(job_id)
+                event = self._cancel_events.get(job_id)
+                if event is not None:
+                    event.set()
+                for group in self._process_groups.get(job_id, ()):
+                    group.terminate_all()
             return True
 
     def acquire_download(self, job_id: str, allow_expired: bool = False) -> ExportJob | None:
@@ -261,22 +274,23 @@ class ExportJobManager:
         job.status = JobStatus.WORKING
         job.phase, job.percent = "downloading", 5
         self._persist(job)
+        outcome: JobStatus | None = None
         try:
             if job.status is JobStatus.CANCELLED or job.id in self._cancelled:
                 outcome = JobStatus.CANCELLED
             elif self.export_runner is not None:
-                clips = self.export_runner(job.specs, job.work_dir)
+                clips = self._call_runner(self.export_runner, job, job.specs, job.work_dir)
             else:
                 clips = []
                 for index, spec in enumerate(job.specs):
                     part_dir = job.work_dir / f"part-{index}"
                     part_dir.mkdir()
-                    clips.append(self.runner(spec, part_dir))
+                    clips.append(self._call_runner(self.runner, job, spec, part_dir))
                     if job.id in self._cancelled:
                         outcome = JobStatus.CANCELLED
                         break
                     job.phase, job.percent = "cutting", 10 + int(70 * (index + 1) / len(job.specs))
-            if "outcome" not in locals():
+            if outcome is None:
                 job.title = safe_title(clips[0].title)
                 job.phase, job.percent = "packaging", 90
                 zip_path = job.work_dir / "export.zip"
@@ -292,22 +306,45 @@ class ExportJobManager:
                 job.phase, job.percent = "complete", 100
                 outcome = JobStatus.DONE
         except TimeoutError as exc:
-            log.warning("export timed out: %s", exc)
+            log.warning("job %s timed out during export: %s", job.id, exc)
             job.error = "The media operation timed out. Try a shorter range or lower quality."
             outcome = JobStatus.CANCELLED if job.id in self._cancelled else JobStatus.FAILED
+        except ProcessCancelledError:
+            outcome = JobStatus.CANCELLED
         except Exception:
             log.exception("export failed")
             job.error = "Something went wrong on our side."
             outcome = JobStatus.CANCELLED if job.id in self._cancelled else JobStatus.FAILED
         finally:
-            for child in job.work_dir.iterdir():
-                if child.name != "export.zip":
-                    shutil.rmtree(child, ignore_errors=True)
+            if outcome is not JobStatus.DONE:
+                shutil.rmtree(job.work_dir, ignore_errors=True)
+            elif job.work_dir.exists():
+                for child in job.work_dir.iterdir():
+                    if child.name != "export.zip":
+                        shutil.rmtree(child, ignore_errors=True)
+            self._cancel_events.pop(job.id, None)
+            self._process_groups.pop(job.id, None)
+            self._cancelled.discard(job.id)
         job.finished = time.time()
-        job.status = outcome
+        job.status = outcome or JobStatus.FAILED
         if outcome is not JobStatus.DONE or self.storage is not None:
             self._release_resources(job)
         self._persist(job)
+
+    def _call_runner(self, runner, job, *args):
+        group = ProcessGroup()
+        self._process_groups[job.id].add(group)
+        try:
+            parameters = inspect.signature(runner).parameters
+            kwargs = {}
+            if "cancelled" in parameters:
+                kwargs["cancelled"] = self._cancel_events[job.id]
+            if "process_group" in parameters:
+                kwargs["process_group"] = group
+            with group:
+                return runner(*args, **kwargs)
+        finally:
+            self._process_groups[job.id].discard(group)
 
     def _release_resources(self, job: ExportJob) -> None:
         if job.resource_reserved:
@@ -448,6 +485,8 @@ class JobManager:
         self._queue = make_queue(self.queue_adapter, self.workers, "clip")
         self._jobs: dict[str, Job] = {}
         self._cancelled: set[str] = set()
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._process_groups: dict[str, set[ProcessGroup]] = {}
         self._speed: dict[tuple[int, Mode], float] = {}  # seconds of video cut per second of work
         self._lock = threading.Lock()
         self._repository = None
@@ -485,6 +524,8 @@ class JobManager:
                 job.phase, job.percent = record.phase, record.percent
                 job.work_dir.mkdir(parents=True, exist_ok=True)
                 self._jobs[job.id] = job
+                self._cancel_events[job.id] = threading.Event()
+                self._process_groups[job.id] = set()
                 self._queue.submit(self._run, job)
 
     def submit(self, spec: ClipSpec, client: str) -> Job:
@@ -511,6 +552,8 @@ class JobManager:
             job.resource_reserved = True
             job.work_dir.mkdir()
             self._jobs[job_id] = job
+            self._cancel_events[job_id] = threading.Event()
+            self._process_groups[job_id] = set()
             if self._repository:
                 self._repository.add(
                     JobRecord(
@@ -566,12 +609,21 @@ class JobManager:
             if job is None or job.status not in _ACTIVE:
                 return False
             self._cancelled.add(job_id)
+            event = self._cancel_events.get(job_id)
+            if event is not None:
+                event.set()
             if job.status is JobStatus.QUEUED:
                 job.status = JobStatus.CANCELLED
                 job.finished = time.time()
                 self._release_resources(job)
                 shutil.rmtree(job.work_dir, ignore_errors=True)
                 self._persist(job)
+                self._cancelled.discard(job_id)
+                self._cancel_events.pop(job_id, None)
+                self._process_groups.pop(job_id, None)
+            else:
+                for group in self._process_groups.get(job_id, ()):
+                    group.terminate_all()
             return True
 
     def acquire_download(self, job_id: str, allow_expired: bool = False) -> Job | None:
@@ -629,7 +681,7 @@ class JobManager:
                 outcome = JobStatus.CANCELLED
                 break
             try:
-                job.clip = self.runner(job.spec, job.work_dir)
+                job.clip = self._call_runner(self.runner, job, job.spec, job.work_dir)
                 if job.id in self._cancelled:
                     shutil.rmtree(job.work_dir, ignore_errors=True)
                     outcome = JobStatus.CANCELLED
@@ -641,10 +693,14 @@ class JobManager:
                 outcome = JobStatus.DONE
                 break
             except TimeoutError as e:
-                log.warning("clip timed out for %s: %s", job.spec.url, e)
+                log.warning("job %s timed out during clip: %s", job.id, e)
                 job.error = "The media operation timed out. Try a shorter range or lower quality."
                 shutil.rmtree(job.work_dir, ignore_errors=True)
                 outcome = JobStatus.CANCELLED if job.id in self._cancelled else JobStatus.FAILED
+                break
+            except ProcessCancelledError:
+                shutil.rmtree(job.work_dir, ignore_errors=True)
+                outcome = JobStatus.CANCELLED
                 break
             except Exception as e:
                 attempts += 1
@@ -668,6 +724,24 @@ class JobManager:
         if outcome is not JobStatus.DONE or self.storage is not None:
             self._release_resources(job)
         self._persist(job)
+        self._cancel_events.pop(job.id, None)
+        self._process_groups.pop(job.id, None)
+        self._cancelled.discard(job.id)
+
+    def _call_runner(self, runner, job, *args):
+        group = ProcessGroup()
+        self._process_groups[job.id].add(group)
+        try:
+            parameters = inspect.signature(runner).parameters
+            kwargs = {}
+            if "cancelled" in parameters:
+                kwargs["cancelled"] = self._cancel_events[job.id]
+            if "process_group" in parameters:
+                kwargs["process_group"] = group
+            with group:
+                return runner(*args, **kwargs)
+        finally:
+            self._process_groups[job.id].discard(group)
 
     def _release_resources(self, job: Job) -> None:
         if job.resource_reserved:
