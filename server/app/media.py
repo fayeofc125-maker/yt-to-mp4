@@ -83,7 +83,7 @@ _CAPTION_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _max_download_bytes() -> int:
-    value = int(os.getenv("MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024**3)))
+    value = int(os.getenv("MEDIA_MAX_DOWNLOAD_BYTES", str(4 * 1024**3)))
     if value <= 0:
         raise ValueError("MEDIA_MAX_DOWNLOAD_BYTES must be positive")
     return value

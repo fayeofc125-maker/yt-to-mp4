@@ -119,7 +119,7 @@ Behind a reverse proxy, make sure the real client IP reaches the app (the per-us
 | `MEDIA_TIMEOUT_PER_MINUTE_SECONDS` | `60`     | Additional budget per requested media minute |
 | `MEDIA_TIMEOUT_MIN_SECONDS` | `120`          | Minimum media-operation budget |
 | `MEDIA_TIMEOUT_MAX_SECONDS` | `7200`         | Maximum media-operation budget |
-| `MEDIA_MAX_DOWNLOAD_BYTES` | `2147483648` | Hard yt-dlp source-download cap (2 GiB) |
+| `MEDIA_MAX_DOWNLOAD_BYTES` | `4294967296` | Hard yt-dlp source-download cap (4 GiB) |
 | `CLEANUP_GRACE_SECONDS` | `300`                 | Grace period before expired files are removed |
 | `STORAGE_BACKEND` | `local` | `local` (default), `s3`, or `minio` |
 | `STORAGE_BUCKET` | `clipper-results` | S3-compatible bucket |

@@ -20,6 +20,7 @@ from app.media import (
     PrimaryUrlError,
     _CaptionRedirectHandler,
     _fetch_caption_payload,
+    _max_download_bytes,
     _run_ffmpeg,
     _timeout_hook,
     download_clip,
@@ -106,6 +107,14 @@ def test_media_timeout_scales_with_duration_and_is_bounded(monkeypatch):
     assert media_timeout_seconds(5) == 45
     assert media_timeout_seconds(60 * 60) == 3600
     assert media_timeout_seconds(60 * 60 * 100) == 3600
+
+
+def test_source_download_limit_defaults_to_four_gib_and_remains_configurable(monkeypatch):
+    monkeypatch.delenv("MEDIA_MAX_DOWNLOAD_BYTES", raising=False)
+    assert _max_download_bytes() == 4 * 1024**3
+
+    monkeypatch.setenv("MEDIA_MAX_DOWNLOAD_BYTES", "123456789")
+    assert _max_download_bytes() == 123456789
 
 
 def test_timeout_hook_fails_fast_for_a_hung_short_operation():
