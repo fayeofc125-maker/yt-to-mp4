@@ -37,6 +37,7 @@ from .media import (
     whisper_is_configured,
 )
 from .rate_limit import RateLimitDecision, make_rate_limiter
+from .resources import ResourceAdmissionError, ResourceGuard
 from .schemas import (
     ClipRequest,
     ExportJobOut,
@@ -80,6 +81,8 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
+resource_guard = ResourceGuard()
+
 # Clips are CPU and bandwidth heavy, so only a few run at once and the rest wait in line.
 jobs = JobManager(
     download_clip,
@@ -90,6 +93,7 @@ jobs = JobManager(
     cleanup_grace=int(os.getenv("CLEANUP_GRACE_SECONDS", "300")),
     metadata_fetcher=fetch_info,
     storage=configured_storage,
+    resources=resource_guard,
 )
 export_jobs = ExportJobManager(
     download_clip,
@@ -100,6 +104,7 @@ export_jobs = ExportJobManager(
     queue_adapter=os.getenv("QUEUE_BACKEND", os.getenv("QUEUE_ADAPTER", "thread")),
     cleanup_grace=int(os.getenv("CLEANUP_GRACE_SECONDS", "300")),
     storage=configured_storage,
+    resources=resource_guard,
 )
 transcript_jobs = TranscriptJobManager(
     fetch_whisper_transcript,
@@ -204,6 +209,10 @@ def create_job(req: ClipRequest, request: Request) -> JobOut:
         ) from e
     except QueueFull as e:
         raise HTTPException(503, "Server is busy, try again in a moment.") from e
+    except ResourceAdmissionError as e:
+        raise HTTPException(
+            507, "The server is temporarily out of capacity. Try again later."
+        ) from e
     return _view(job)
 
 
@@ -244,6 +253,10 @@ def create_export(req: ExportRequest, request: Request) -> ExportJobOut:
         raise HTTPException(429, "You already have exports in progress.") from e
     except QueueFull as e:
         raise HTTPException(503, "Server is busy, try again in a moment.") from e
+    except ResourceAdmissionError as e:
+        raise HTTPException(
+            507, "The server is temporarily out of capacity. Try again later."
+        ) from e
     return _export_view(job)
 
 

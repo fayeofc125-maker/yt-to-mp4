@@ -3,6 +3,7 @@
 import inspect
 import json
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -24,6 +25,7 @@ from .media import Clip, ClipSpec, Mode
 from .models import JobRecord
 from .queue import make_queue
 from .repository import JobRepository
+from .resources import ResourceAdmissionError, ResourceGuard
 from .storage import ObjectStorage
 
 log = logging.getLogger("clipper.jobs")
@@ -68,6 +70,7 @@ class Job:
     download_refs: int = 0
     object_key: str | None = None
     result_size: int | None = None
+    resource_reserved: bool = False
 
     @property
     def filename(self) -> str | None:
@@ -105,6 +108,7 @@ class ExportJob:
     download_refs: int = 0
     object_key: str | None = None
     result_size: int | None = None
+    resource_reserved: bool = False
 
     @property
     def filename(self) -> str:
@@ -122,8 +126,16 @@ class ExportJobManager:
     queue_adapter: str = "thread"
     cleanup_grace: int = 0
     storage: ObjectStorage | None = None
+    resources: ResourceGuard | None = None
+    estimated_bytes: int = field(
+        default_factory=lambda: int(os.getenv("EXPORT_TEMP_RESERVATION_BYTES", str(2 * 1024**3)))
+    )
+    memory_mb: int = field(
+        default_factory=lambda: int(os.getenv("EXPORT_MEMORY_RESERVATION_MB", "1024"))
+    )
 
     def __post_init__(self) -> None:
+        self.resources = self.resources or ResourceGuard()
         shutil.rmtree(self.root, ignore_errors=True)
         self.root.mkdir(parents=True, exist_ok=True)
         self._queue = make_queue(self.queue_adapter, self.workers, "export")
@@ -147,6 +159,18 @@ class ExportJobManager:
             job = ExportJob(
                 secrets.token_urlsafe(16), specs, client, self.root / secrets.token_hex(8)
             )
+            try:
+                self.resources.reserve(
+                    job.id,
+                    self.root,
+                    estimated_bytes=self.estimated_bytes,
+                    heavy=True,
+                    memory_mb=self.memory_mb,
+                )
+            except ResourceAdmissionError as exc:
+                log.warning("export admission rejected for job %s: %s", job.id, exc.reason)
+                raise
+            job.resource_reserved = True
             job.work_dir.mkdir()
             self._jobs[job.id] = job
             if self._repository:
@@ -182,6 +206,8 @@ class ExportJobManager:
             if job.status is JobStatus.QUEUED:
                 job.status = JobStatus.CANCELLED
                 job.finished = time.time()
+                self._release_resources(job)
+                shutil.rmtree(job.work_dir, ignore_errors=True)
                 self._persist(job)
             else:
                 self._cancelled.add(job_id)
@@ -279,7 +305,14 @@ class ExportJobManager:
                     shutil.rmtree(child, ignore_errors=True)
         job.finished = time.time()
         job.status = outcome
+        if outcome is not JobStatus.DONE or self.storage is not None:
+            self._release_resources(job)
         self._persist(job)
+
+    def _release_resources(self, job: ExportJob) -> None:
+        if job.resource_reserved:
+            self.resources.release(job.id)
+            job.resource_reserved = False
 
     def expires_in(self, job: ExportJob) -> int | None:
         if job.finished is None:
@@ -295,6 +328,7 @@ class ExportJobManager:
                 and job.download_refs == 0
             ):
                 shutil.rmtree(job.work_dir, ignore_errors=True)
+                self._release_resources(job)
                 del self._jobs[job_id]
                 if self.storage is not None and job.object_key:
                     self.storage.delete(job.object_key)
@@ -398,8 +432,16 @@ class JobManager:
     cleanup_grace: int = 0
     metadata_fetcher: Callable[[str], dict] | None = None
     storage: ObjectStorage | None = None
+    resources: ResourceGuard | None = None
+    estimated_bytes: int = field(
+        default_factory=lambda: int(os.getenv("CLIP_TEMP_RESERVATION_BYTES", str(512 * 1024**2)))
+    )
+    memory_mb: int = field(
+        default_factory=lambda: int(os.getenv("CLIP_MEMORY_RESERVATION_MB", "512"))
+    )
 
     def __post_init__(self) -> None:
+        self.resources = self.resources or ResourceGuard()
         if self.db_url is None:
             shutil.rmtree(self.root, ignore_errors=True)  # preserve legacy ephemeral behavior
         self.root.mkdir(parents=True, exist_ok=True)
@@ -455,6 +497,18 @@ class JobManager:
                 raise QueueFull
             job_id = secrets.token_urlsafe(16)  # doubles as the secret link to the file
             job = Job(job_id, spec, client, self.root / job_id)
+            try:
+                self.resources.reserve(
+                    job.id,
+                    self.root,
+                    estimated_bytes=self.estimated_bytes,
+                    heavy=spec.mode is Mode.EXACT,
+                    memory_mb=self.memory_mb if spec.mode is Mode.EXACT else 0,
+                )
+            except ResourceAdmissionError as exc:
+                log.warning("clip admission rejected for job %s: %s", job.id, exc.reason)
+                raise
+            job.resource_reserved = True
             job.work_dir.mkdir()
             self._jobs[job_id] = job
             if self._repository:
@@ -515,6 +569,8 @@ class JobManager:
             if job.status is JobStatus.QUEUED:
                 job.status = JobStatus.CANCELLED
                 job.finished = time.time()
+                self._release_resources(job)
+                shutil.rmtree(job.work_dir, ignore_errors=True)
                 self._persist(job)
             return True
 
@@ -609,7 +665,14 @@ class JobManager:
         if outcome is JobStatus.DONE:
             self._learn(job)
         job.status = outcome
+        if outcome is not JobStatus.DONE or self.storage is not None:
+            self._release_resources(job)
         self._persist(job)
+
+    def _release_resources(self, job: Job) -> None:
+        if job.resource_reserved:
+            self.resources.release(job.id)
+            job.resource_reserved = False
 
     def _learn(self, job: Job) -> None:
         spec = job.spec
@@ -629,6 +692,7 @@ class JobManager:
                 and job.download_refs == 0
             ):
                 shutil.rmtree(job.work_dir, ignore_errors=True)
+                self._release_resources(job)
                 del self._jobs[job_id]
                 if self.storage is not None and job.object_key:
                     self.storage.delete(job.object_key)

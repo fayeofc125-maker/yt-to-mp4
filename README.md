@@ -105,12 +105,21 @@ Behind a reverse proxy, make sure the real client IP reaches the app (the per-us
 | `ALLOWED_ORIGINS`      | `http://localhost:3000` |
 | `MAX_CONCURRENT_CLIPS` | `2`                     |
 | `CLIP_TTL_SECONDS`     | `1800`                  |
+| `TEMP_STORAGE_BUDGET_BYTES` | `21474836480` | Reserved local temporary/download/output budget (20 GiB) |
+| `TEMP_STORAGE_MIN_FREE_BYTES` | `1073741824` | Required free space on the temporary filesystem after a reservation (1 GiB) |
+| `CLIP_TEMP_RESERVATION_BYTES` | `536870912` | Per-clip reservation covering downloads, FFmpeg partials, and output (512 MiB) |
+| `EXPORT_TEMP_RESERVATION_BYTES` | `2147483648` | Per-export reservation covering source, cuts, ZIP, and partials (2 GiB) |
+| `RESOURCE_MAX_HEAVY_JOBS` | `0` | Maximum admitted exact/export jobs (0 disables this cap) |
+| `RESOURCE_MAX_MEMORY_MB` | `0` | Aggregate memory reservation for admitted heavy jobs (0 disables this cap) |
+| `CLIP_MEMORY_RESERVATION_MB` | `512` | Memory reservation for an exact clip |
+| `EXPORT_MEMORY_RESERVATION_MB` | `1024` | Memory reservation for an export |
 | `DATABASE_URL`         | `sqlite:///clipper.db`  |
 | `QUEUE_ADAPTER`        | `thread`                |
 | `MEDIA_TIMEOUT_BASE_SECONDS` | `300`          | Base yt-dlp/FFmpeg media-operation budget |
 | `MEDIA_TIMEOUT_PER_MINUTE_SECONDS` | `60`     | Additional budget per requested media minute |
 | `MEDIA_TIMEOUT_MIN_SECONDS` | `120`          | Minimum media-operation budget |
 | `MEDIA_TIMEOUT_MAX_SECONDS` | `7200`         | Maximum media-operation budget |
+| `MEDIA_MAX_DOWNLOAD_BYTES` | `2147483648` | Hard yt-dlp source-download cap (2 GiB) |
 | `CLEANUP_GRACE_SECONDS` | `300`                 | Grace period before expired files are removed |
 | `STORAGE_BACKEND` | `local` | `local` (default), `s3`, or `minio` |
 | `STORAGE_BUCKET` | `clipper-results` | S3-compatible bucket |

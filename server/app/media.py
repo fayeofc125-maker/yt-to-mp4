@@ -82,6 +82,13 @@ _CAPTION_HOSTS = frozenset(
 _CAPTION_MAX_BYTES = 4 * 1024 * 1024
 
 
+def _max_download_bytes() -> int:
+    value = int(os.getenv("MEDIA_MAX_DOWNLOAD_BYTES", str(2 * 1024**3)))
+    if value <= 0:
+        raise ValueError("MEDIA_MAX_DOWNLOAD_BYTES must be positive")
+    return value
+
+
 def _caption_host_allowed(hostname: str | None) -> bool:
     if not hostname:
         return False
@@ -380,6 +387,7 @@ def download_clip(spec: ClipSpec, out_dir: Path) -> Clip:
         "merge_output_format": "mp4",
         "download_ranges": download_range_func(None, [(spec.start, spec.end)]),
         "outtmpl": str(out_dir / "clip.%(ext)s"),
+        "max_filesize": _max_download_bytes(),
     }
     if spec.mode is Mode.EXACT:
         opts["force_keyframes_at_cuts"] = True
@@ -417,6 +425,7 @@ def download_export(specs: tuple[ClipSpec, ...], out_dir: Path) -> list[Clip]:
         "format_sort": [f"res:{first.quality.res}", "fps", "codec"],
         "merge_output_format": "mp4",
         "outtmpl": str(source_dir / "source.%(ext)s"),
+        "max_filesize": _max_download_bytes(),
     }
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(first.url, download=True)
