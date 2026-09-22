@@ -1,10 +1,13 @@
+import os
 import time
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from app.formats import Quality
 from app.jobs import ExportJobManager, JobManager, JobStatus
 from app.media import Clip, ClipSpec, Mode
-from app.storage import ObjectStorage, StoredObject
+from app.storage import ObjectStorage, StorageError, StoredObject
 
 SPEC = ClipSpec("https://youtu.be/x", 1, 3, Quality(720), Mode.FAST)
 
@@ -132,3 +135,93 @@ def test_export_manager_uploads_zip_with_convention(tmp_path):
     assert job.status is JobStatus.DONE
     assert job.object_key == f"exports/{job.id}/Title.zip"
     assert (storage.root / job.object_key).is_file()
+
+
+def test_local_reconciliation_preserves_active_and_valid_objects(tmp_path):
+    storage = ObjectStorage("local", root=tmp_path / "objects")
+    active = storage.root / "clips" / "active-job" / "clip.mp4"
+    valid = storage.root / "exports" / "valid-job" / "export.zip"
+    orphan = storage.root / "clips" / "old-job" / "partial.mp4"
+    recent = storage.root / "clips" / "recent-job" / "partial.mp4"
+    for path in (active, valid, orphan, recent):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    old = time.time() - 100
+    os.utime(orphan, (old, old))
+    assert storage.reconcile(
+        {"clips/active-job/clip.mp4", "exports/valid-job/export.zip"},
+        orphan_age_seconds=60,
+    ) == ["clips/old-job/partial.mp4"]
+    assert active.exists()
+    assert valid.exists()
+    assert not orphan.exists()
+    assert recent.exists()
+
+
+def test_local_reconciliation_is_safe_for_unrelated_paths_and_traversal(tmp_path):
+    storage = ObjectStorage("local", root=tmp_path / "objects")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep")
+    unrelated = storage.root / "unrelated" / "old.txt"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"keep")
+    old = time.time() - 100
+    os.utime(unrelated, (old, old))
+    assert storage.reconcile(set(), orphan_age_seconds=60) == []
+    assert unrelated.exists()
+    with pytest.raises(StorageError):
+        storage.delete("../outside.txt")
+    with pytest.raises(StorageError):
+        storage.delete("clips/job/../../outside.txt")
+    assert outside.exists()
+
+
+def test_local_reconciliation_tolerates_missing_and_failed_deletions(tmp_path, monkeypatch):
+    storage = ObjectStorage("local", root=tmp_path / "objects")
+    failing = storage.root / "clips" / "failed-job" / "a.mp4"
+    removable = storage.root / "clips" / "remove-job" / "b.mp4"
+    for path in (failing, removable):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        old = time.time() - 100
+        os.utime(path, (old, old))
+    original_unlink = type(failing).unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == failing:
+            raise OSError("locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(failing), "unlink", unlink)
+    assert storage.reconcile(set(), orphan_age_seconds=60) == ["clips/remove-job/b.mp4"]
+    removable.unlink(missing_ok=True)
+    assert storage.reconcile(set(), orphan_age_seconds=60) == []
+    assert failing.exists()
+
+
+def test_reconciliation_removes_old_failed_work_dirs_but_not_recent_or_active(tmp_path):
+    root = tmp_path / "jobs"
+    active = root / "active-job"
+    failed = root / "failed-job"
+    recent = root / "recent-job"
+    for path in (active, failed, recent):
+        path.mkdir(parents=True)
+        (path / "partial.mp4").write_bytes(b"x")
+    old = time.time() - 100
+    os.utime(failed, (old, old))
+
+    def runner(spec, out_dir):
+        path = out_dir / "clip.mp4"
+        path.write_bytes(b"x")
+        return Clip(path, "Title")
+
+    manager = JobManager(
+        runner,
+        root=root,
+        db_url=f"sqlite:///{tmp_path / 'jobs.db'}",
+        reconciliation_age=60,
+    )
+    manager.reconcile()
+    assert active.exists()
+    assert recent.exists()
+    assert not failed.exists()

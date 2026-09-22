@@ -26,13 +26,14 @@ from .models import JobRecord
 from .queue import make_queue
 from .repository import JobRepository
 from .resources import ResourceAdmissionError, ResourceGuard
-from .storage import ObjectStorage
+from .storage import ObjectStorage, StorageError
 
 log = logging.getLogger("clipper.jobs")
 
 MAX_QUEUED = 20  # jobs waiting for a worker, across all users
 MAX_ACTIVE_PER_CLIENT = 2  # queued or running jobs one user may have at once
 _SPEED_SMOOTHING = 0.3
+_RECONCILIATION_AGE_SECONDS = 60 * 60
 
 
 class JobStatus(StrEnum):
@@ -44,6 +45,7 @@ class JobStatus(StrEnum):
 
 
 _ACTIVE = {JobStatus.QUEUED, JobStatus.WORKING}
+_ACTIVE_VALUES = {status.value for status in _ACTIVE}
 
 
 class QueueFull(Exception):
@@ -52,6 +54,31 @@ class QueueFull(Exception):
 
 class TooManyJobs(Exception):
     pass
+
+
+def _is_expired(finished: float, ttl: int) -> bool:
+    return time.time() - finished > ttl
+
+
+def _reconcile_work_root(root: Path, active_ids: set[str], *, orphan_age_seconds: int) -> None:
+    now = time.time()
+    if not root.is_dir():
+        return
+    for path in root.iterdir():
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or path.name in active_ids
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", path.name)
+        ):
+            continue
+        try:
+            if now - path.stat().st_mtime < orphan_age_seconds:
+                continue
+            shutil.rmtree(path)
+            log.info("removed orphan work directory %s", path)
+        except (FileNotFoundError, OSError):
+            log.exception("could not remove orphan work directory %s", path)
 
 
 @dataclass
@@ -133,10 +160,10 @@ class ExportJobManager:
     memory_mb: int = field(
         default_factory=lambda: int(os.getenv("EXPORT_MEMORY_RESERVATION_MB", "1024"))
     )
+    reconciliation_age: int = _RECONCILIATION_AGE_SECONDS
 
     def __post_init__(self) -> None:
         self.resources = self.resources or ResourceGuard()
-        shutil.rmtree(self.root, ignore_errors=True)
         self.root.mkdir(parents=True, exist_ok=True)
         self._queue = make_queue(self.queue_adapter, self.workers, "export")
         self._jobs: dict[str, ExportJob] = {}
@@ -147,6 +174,7 @@ class ExportJobManager:
             self._engine = make_engine(self.db_url)
             create_db_and_tables(self._engine)
             self._repository = JobRepository(self._engine)
+        self.reconcile()
 
     def submit(self, specs: tuple[ClipSpec, ...], client: str) -> ExportJob:
         with self._lock:
@@ -331,7 +359,37 @@ class ExportJobManager:
                 self._release_resources(job)
                 del self._jobs[job_id]
                 if self.storage is not None and job.object_key:
-                    self.storage.delete(job.object_key)
+                    try:
+                        self.storage.delete(job.object_key)
+                    except StorageError:
+                        log.exception("could not delete expired export object %s", job.object_key)
+
+    def reconcile(self) -> None:
+        """Remove old local artifacts that are not owned by a live or valid job."""
+        protected_keys = {
+            job.object_key
+            for job in self._jobs.values()
+            if job.object_key and (job.finished is None or not _is_expired(job.finished, self.ttl))
+        }
+        records = self._repository.list("export") if self._repository else []
+        protected_keys.update(
+            record.object_key
+            for record in records
+            if record.object_key
+            and (
+                record.status in _ACTIVE_VALUES
+                or (record.expires_at is not None and record.expires_at.timestamp() > time.time())
+            )
+        )
+        if self.storage is not None:
+            self.storage.reconcile(protected_keys, orphan_age_seconds=self.reconciliation_age)
+        active_ids = {job.id for job in self._jobs.values() if job.status in _ACTIVE}
+        active_ids.update(record.id for record in records if record.status in _ACTIVE_VALUES)
+        _reconcile_work_root(
+            self.root,
+            active_ids,
+            orphan_age_seconds=self.reconciliation_age,
+        )
 
 
 @dataclass
@@ -439,11 +497,10 @@ class JobManager:
     memory_mb: int = field(
         default_factory=lambda: int(os.getenv("CLIP_MEMORY_RESERVATION_MB", "512"))
     )
+    reconciliation_age: int = _RECONCILIATION_AGE_SECONDS
 
     def __post_init__(self) -> None:
         self.resources = self.resources or ResourceGuard()
-        if self.db_url is None:
-            shutil.rmtree(self.root, ignore_errors=True)  # preserve legacy ephemeral behavior
         self.root.mkdir(parents=True, exist_ok=True)
         self._queue = make_queue(self.queue_adapter, self.workers, "clip")
         self._jobs: dict[str, Job] = {}
@@ -456,6 +513,7 @@ class JobManager:
             create_db_and_tables(self._engine)
             self._repository = JobRepository(self._engine)
             self._restore()
+        self.reconcile()
 
     def _spec_json(self, spec: ClipSpec) -> str:
         return json.dumps(
@@ -695,4 +753,34 @@ class JobManager:
                 self._release_resources(job)
                 del self._jobs[job_id]
                 if self.storage is not None and job.object_key:
-                    self.storage.delete(job.object_key)
+                    try:
+                        self.storage.delete(job.object_key)
+                    except StorageError:
+                        log.exception("could not delete expired clip object %s", job.object_key)
+
+    def reconcile(self) -> None:
+        """Remove old local artifacts that are not owned by a live or valid job."""
+        protected_keys = {
+            job.object_key
+            for job in self._jobs.values()
+            if job.object_key and (job.finished is None or not _is_expired(job.finished, self.ttl))
+        }
+        records = self._repository.list("clip") if self._repository else []
+        protected_keys.update(
+            record.object_key
+            for record in records
+            if record.object_key
+            and (
+                record.status in _ACTIVE_VALUES
+                or (record.expires_at is not None and record.expires_at.timestamp() > time.time())
+            )
+        )
+        if self.storage is not None:
+            self.storage.reconcile(protected_keys, orphan_age_seconds=self.reconciliation_age)
+        active_ids = {job.id for job in self._jobs.values() if job.status in _ACTIVE}
+        active_ids.update(record.id for record in records if record.status in _ACTIVE_VALUES)
+        _reconcile_work_root(
+            self.root,
+            active_ids,
+            orphan_age_seconds=self.reconciliation_age,
+        )

@@ -6,12 +6,15 @@ both boto3 and explicit bucket/endpoint configuration.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlencode
+
+log = logging.getLogger("clipper.storage")
 
 
 class StorageError(RuntimeError):
@@ -74,6 +77,7 @@ class ObjectStorage:
         )
 
     def upload(self, source: Path, key: str) -> StoredObject:
+        self._validate_key(key)
         if not source.is_file():
             raise StorageError(f"Result file does not exist: {source}")
         try:
@@ -88,6 +92,7 @@ class ObjectStorage:
             raise StorageError(f"Could not upload result object {key}") from exc
 
     def delete(self, key: str) -> None:
+        self._validate_key(key)
         try:
             if self.backend == "local":
                 target = self.root / key
@@ -98,12 +103,13 @@ class ObjectStorage:
             raise StorageError(f"Could not delete result object {key}") from exc
 
     def signed_url(self, key: str, expires: int | None = None) -> str:
+        self._validate_key(key)
+        if self.backend == "local":
+            raise StorageError("Signed URLs are only supported by object storage")
         ttl = self.signed_url_seconds if expires is None else min(expires, self.signed_url_seconds)
         if ttl <= 0:
             raise ValueError("Signed URL expiry must be positive")
         try:
-            if self.backend == "local":
-                return f"/api/storage/{key}?{urlencode({'expires': ttl})}"
             return self._client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self.bucket, "Key": key},
@@ -124,3 +130,55 @@ class ObjectStorage:
         if remaining < 1:
             raise StorageError("Result has expired and cannot be downloaded")
         return self.signed_url(key, min(int(remaining), 3600))
+
+    def reconcile(
+        self,
+        protected_keys: set[str],
+        *,
+        now: float | None = None,
+        orphan_age_seconds: int = 3600,
+    ) -> list[str]:
+        """Remove only old, unreferenced objects in Clipper's result prefixes."""
+        if self.backend != "local":
+            return []
+        if orphan_age_seconds <= 0:
+            raise ValueError("orphan_age_seconds must be positive")
+        current = datetime.now(UTC).timestamp() if now is None else now
+        removed: list[str] = []
+        for prefix in ("clips", "exports"):
+            directory = self.root / prefix
+            if not directory.is_dir():
+                continue
+            for job_dir in directory.iterdir():
+                if (
+                    job_dir.is_symlink()
+                    or not job_dir.is_dir()
+                    or not re.fullmatch(r"[A-Za-z0-9_-]+", job_dir.name)
+                ):
+                    continue
+                for path in job_dir.iterdir():
+                    if not path.is_file():
+                        continue
+                    key = f"{prefix}/{job_dir.name}/{path.name}"
+                    if key in protected_keys:
+                        continue
+                    try:
+                        if current - path.stat().st_mtime < orphan_age_seconds:
+                            continue
+                        path.unlink()
+                        removed.append(key)
+                        log.info("removed orphan object %s", key)
+                    except (FileNotFoundError, OSError):
+                        continue
+        return removed
+
+    @staticmethod
+    def _validate_key(key: str) -> None:
+        if (
+            not key
+            or "\\" in key
+            or key.startswith("/")
+            or any(part in {"", ".", ".."} for part in key.split("/"))
+            or not re.fullmatch(r"(?:clips|exports)/[A-Za-z0-9_-]+/[^/]+", key)
+        ):
+            raise StorageError("Invalid storage object key")
